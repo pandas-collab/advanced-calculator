@@ -1,182 +1,265 @@
-import { HISTORY_CONFIG } from "../utils/constants";
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { historyService } from '../services/historyService';
+import { replayCalculation } from "../services/historyService.js";
 
-const STORAGE_KEY = 'calculator_history';
-const MAX_HISTORY_ITEMS = 100;
+const useHistory = (options = {}) => {
+  const {
+    pageSize = 20,
+    autoRefresh = false,
+    refreshInterval = 30000,
+    filters = {},
+    sortBy = 'createdAt',
+    sortOrder = 'desc'
+  } = options;
 
-export const useHistory = () => {
   const [history, setHistory] = useState([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState('all');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Load history from localStorage on mount
-  useEffect(() => {
+  const intervalRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  const fetchHistory = useCallback(async (page = 1, append = false) => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    abortControllerRef.current = new AbortController();
+    
     try {
-      const savedHistory = localStorage.getItem(STORAGE_KEY);
-      if (savedHistory) {
-        const parsedHistory = JSON.parse(savedHistory);
-        setHistory(parsedHistory);
+      if (!append) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
       }
-    } catch (error) {
-      console.error('Error loading history from localStorage:', error);
-    }
-  }, []);
+      setError(null);
 
-  // Save history to localStorage whenever it changes
-  useEffect(() => {
+      const params = {
+        page,
+        limit: pageSize,
+        sortBy,
+        sortOrder,
+        ...filters
+      };
+
+      const response = await historyService.getHistory(params, {
+        signal: abortControllerRef.current.signal
+      });
+
+      const { data, pagination } = response;
+
+      if (append && page > 1) {
+        setHistory(prev => [...prev, ...data]);
+      } else {
+        setHistory(data);
+      }
+
+      setTotalCount(pagination.total);
+      setHasMore(pagination.hasNext);
+      setCurrentPage(page);
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setError(err.message || 'Failed to fetch history');
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [pageSize, sortBy, sortOrder, filters]);
+
+  const loadMore = useCallback(() => {
+    if (!loading && !refreshing && hasMore) {
+      fetchHistory(currentPage + 1, true);
+    }
+  }, [loading, refreshing, hasMore, currentPage, fetchHistory]);
+
+  const refresh = useCallback(() => {
+    fetchHistory(1, false);
+  }, [fetchHistory]);
+
+  const addHistoryItem = useCallback(async (item) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
-    } catch (error) {
-      console.error('Error saving history to localStorage:', error);
+      setError(null);
+      const newItem = await historyService.createHistoryItem(item);
+      setHistory(prev => [newItem, ...prev]);
+      setTotalCount(prev => prev + 1);
+      return newItem;
+    } catch (err) {
+      setError(err.message || 'Failed to add history item');
+      throw err;
     }
-  }, [history]);
-
-  // Detect calculation type based on expression
-  const detectCalculationType = useCallback((expression) => {
-    if (!expression) return 'basic';
-    
-    const trigFunctions = /sin|cos|tan|asin|acos|atan/i;
-    const logFunctions = /log|ln/i;
-    const powerFunctions = /\^|\*\*|sqrt|cbrt/i;
-    const basicOperators = /[+\-*/]/;
-    
-    if (trigFunctions.test(expression)) return 'trigonometry';
-    if (logFunctions.test(expression)) return 'logarithmic';
-    if (powerFunctions.test(expression)) return 'exponential';
-    if (basicOperators.test(expression)) return 'basic';
-    
-    return 'basic';
   }, []);
 
-  // Add new calculation to history
-  const addToHistory = useCallback((expression, result) => {
-    if (!expression || result === undefined || result === null) return;
-    
-    const newEntry = {
-      id: Date.now(),
-      expression: expression.toString(),
-      result: result.toString(),
-      timestamp: new Date().toISOString(),
-      type: detectCalculationType(expression)
-    };
-
-    setHistory(prevHistory => {
-      const updatedHistory = [newEntry, ...prevHistory];
-      // Limit history size
-      return updatedHistory.slice(0, MAX_HISTORY_ITEMS);
-    });
-  }, [detectCalculationType]);
-
-  // Filter and search history
-  const filteredHistory = useMemo(() => {
-    let filtered = history;
-
-    // Filter by type
-    if (filterType !== 'all') {
-      filtered = filtered.filter(item => item.type === filterType);
-    }
-
-    // Search in expression and result
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase().trim();
-      filtered = filtered.filter(item => 
-        item.expression.toLowerCase().includes(query) ||
-        item.result.toLowerCase().includes(query)
+  const updateHistoryItem = useCallback(async (id, updates) => {
+    try {
+      setError(null);
+      const updatedItem = await historyService.updateHistoryItem(id, updates);
+      setHistory(prev => 
+        prev.map(item => item.id === id ? updatedItem : item)
       );
+      return updatedItem;
+    } catch (err) {
+      setError(err.message || 'Failed to update history item');
+      throw err;
     }
-
-    return filtered;
-  }, [history, searchQuery, filterType]);
-
-  // Clear all history
-  const clearHistory = useCallback(() => {
-    setHistory([]);
-    setSearchQuery('');
-    setFilterType('all');
   }, []);
 
-  // Remove specific history item
-  const removeHistoryItem = useCallback((id) => {
-    setHistory(prevHistory => prevHistory.filter(item => item.id !== id));
+  const deleteHistoryItem = useCallback(async (id) => {
+    try {
+      setError(null);
+      await historyService.deleteHistoryItem(id);
+      setHistory(prev => prev.filter(item => item.id !== id));
+      setTotalCount(prev => prev - 1);
+    } catch (err) {
+      setError(err.message || 'Failed to delete history item');
+      throw err;
+    }
   }, []);
 
-  // Get history statistics
-  const historyStats = useMemo(() => {
-    const stats = {
-      total: history.length,
-      byType: {
-        basic: 0,
-        trigonometry: 0,
-        logarithmic: 0,
-        exponential: 0
+  const clearHistory = useCallback(async () => {
+    try {
+      setError(null);
+      setLoading(true);
+      await historyService.clearHistory(filters);
+      setHistory([]);
+      setTotalCount(0);
+      setHasMore(false);
+      setCurrentPage(1);
+    } catch (err) {
+      setError(err.message || 'Failed to clear history');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  const searchHistory = useCallback(async (query) => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      const params = {
+        query,
+        page: 1,
+        limit: pageSize,
+        sortBy,
+        sortOrder,
+        ...filters
+      };
+
+      const response = await historyService.searchHistory(params);
+      const { data, pagination } = response;
+
+      setHistory(data);
+      setTotalCount(pagination.total);
+      setHasMore(pagination.hasNext);
+      setCurrentPage(1);
+    } catch (err) {
+      setError(err.message || 'Failed to search history');
+    } finally {
+      setLoading(false);
+    }
+  }, [pageSize, sortBy, sortOrder, filters]);
+
+  // Setup real-time updates
+  useEffect(() => {
+    const handleHistoryUpdate = (event) => {
+      const { type, data } = event.detail;
+      
+      switch (type) {
+        case 'created':
+          setHistory(prev => [data, ...prev]);
+          setTotalCount(prev => prev + 1);
+          break;
+        case 'updated':
+          setHistory(prev => 
+            prev.map(item => item.id === data.id ? data : item)
+          );
+          break;
+        case 'deleted':
+          setHistory(prev => prev.filter(item => item.id !== data.id));
+          setTotalCount(prev => prev - 1);
+          break;
+        default:
+          break;
       }
     };
 
-    history.forEach(item => {
-      if (stats.byType.hasOwnProperty(item.type)) {
-        stats.byType[item.type]++;
-      }
-    });
-
-    return stats;
-  }, [history]);
-
-  // Export history as JSON
-  const exportHistory = useCallback(() => {
-    const dataStr = JSON.stringify(history, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `calculator_history_${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }, [history]);
-
-  // Import history from JSON
-  const importHistory = useCallback((jsonString) => {
-    try {
-      const importedHistory = JSON.parse(jsonString);
-      if (Array.isArray(importedHistory)) {
-        // Validate imported data structure
-        const validHistory = importedHistory.filter(item => 
-          item && 
-          typeof item.expression === 'string' && 
-          typeof item.result === 'string' &&
-          item.timestamp &&
-          item.id
-        );
-        
-        setHistory(validHistory.slice(0, MAX_HISTORY_ITEMS));
-        return true;
-      }
-    } catch (error) {
-      console.error('Error importing history:', error);
-    }
-    return false;
+    window.addEventListener('historyUpdate', handleHistoryUpdate);
+    return () => {
+      window.removeEventListener('historyUpdate', handleHistoryUpdate);
+    };
   }, []);
 
-  // Get recent calculations (last 10)
-  const recentCalculations = useMemo(() => {
-    return history.slice(0, 10);
-  }, [history]);
+  // Setup auto-refresh
+  useEffect(() => {
+    if (autoRefresh && refreshInterval > 0) {
+      intervalRef.current = setInterval(() => {
+        fetchHistory(1, false);
+      }, refreshInterval);
+
+      return () => {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+        }
+      };
+    }
+  }, [autoRefresh, refreshInterval, fetchHistory]);
+
+  // Initial load
+  useEffect(() => {
+    fetchHistory(1, false);
+    
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, [fetchHistory]);
 
   return {
-    history: filteredHistory,
-    searchQuery,
-    setSearchQuery,
-    filterType,
-    setFilterType,
-    addToHistory,
+    replay,
+    history,
+    loading,
+    error,
+    hasMore,
+    currentPage,
+    totalCount,
+    refreshing,
+    loadMore,
+    refresh,
+    addHistoryItem,
+    updateHistoryItem,
+    deleteHistoryItem,
     clearHistory,
-    removeHistoryItem,
-    historyStats,
-    recentCalculations,
-    exportHistory,
-    importHistory,
-    hasHistory: history.length > 0
+    searchHistory
   };
 };
+
+export { useHistory };
+  // Add replay functionality to the hook
+  const replay = async (historyItem) => {
+    try {
+      setLoading(true);
+      const result = await replayCalculation(historyItem);
+
+      // Refresh history to show the new replayed calculation
+      await fetchHistory();
+
+      return result;
+    } catch (error) {
+      setError(error.message);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Update the return statement to include replay (if not already present)
