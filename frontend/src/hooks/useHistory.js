@@ -1,182 +1,221 @@
-import { HISTORY_CONFIG } from "../utils/constants";
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
 
-const STORAGE_KEY = 'calculator_history';
-const MAX_HISTORY_ITEMS = 100;
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001/api';
 
 export const useHistory = () => {
+  const [replayCallback, setReplayCallback] = useState(null);
   const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [pagination, setPagination] = useState({
+    page: 1,
+    limit: 20,
+    total: 0,
+    totalPages: 0
+  });
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState('all');
+  const [filters, setFilters] = useState({
+    dateFrom: null,
+    dateTo: null,
+    type: null,
+    status: null
+  });
 
-  // Load history from localStorage on mount
-  useEffect(() => {
+  const fetchHistory = useCallback(async (page = 1, search = '', filterParams = {}) => {
     try {
-      const savedHistory = localStorage.getItem(STORAGE_KEY);
-      if (savedHistory) {
-        const parsedHistory = JSON.parse(savedHistory);
-        setHistory(parsedHistory);
+      setLoading(true);
+      setError(null);
+
+      const params = {
+        page,
+        limit: pagination.limit,
+        ...(search && { search }),
+        ...filterParams
+      };
+
+      const response = await axios.get(`${API_BASE_URL}/history`, { params });
+      
+      setHistory(response.data.data || []);
+      setPagination(prev => ({
+        ...prev,
+        page: response.data.pagination?.page || page,
+        total: response.data.pagination?.total || 0,
+        totalPages: response.data.pagination?.totalPages || 0
+      }));
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to fetch history');
+      console.error('Error fetching history:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [pagination.limit]);
+
+  const searchHistory = useCallback((query) => {
+    setSearchQuery(query);
+    setPagination(prev => ({ ...prev, page: 1 }));
+    fetchHistory(1, query, filters);
+  }, [fetchHistory, filters]);
+
+  const filterHistory = useCallback((newFilters) => {
+    setFilters(newFilters);
+    setPagination(prev => ({ ...prev, page: 1 }));
+    fetchHistory(1, searchQuery, newFilters);
+  }, [fetchHistory, searchQuery]);
+
+  const goToPage = useCallback((page) => {
+    if (page >= 1 && page <= pagination.totalPages) {
+      fetchHistory(page, searchQuery, filters);
+    }
+  }, [fetchHistory, pagination.totalPages, searchQuery, filters]);
+
+  const nextPage = useCallback(() => {
+    if (pagination.page < pagination.totalPages) {
+      goToPage(pagination.page + 1);
+    }
+  }, [pagination.page, pagination.totalPages, goToPage]);
+
+  const prevPage = useCallback(() => {
+    if (pagination.page > 1) {
+      goToPage(pagination.page - 1);
+    }
+  }, [pagination.page, goToPage]);
+
+  const deleteHistoryItem = useCallback(async (id) => {
+    try {
+      setLoading(true);
+      await axios.delete(`${API_BASE_URL}/history/${id}`);
+      
+      // Remove item from local state
+      setHistory(prev => prev.filter(item => item.id !== id));
+      
+      // Adjust pagination if needed
+      if (history.length === 1 && pagination.page > 1) {
+        goToPage(pagination.page - 1);
+      } else {
+        // Refresh current page to get accurate counts
+        fetchHistory(pagination.page, searchQuery, filters);
       }
-    } catch (error) {
-      console.error('Error loading history from localStorage:', error);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to delete history item');
+      console.error('Error deleting history item:', err);
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }, [history.length, pagination.page, searchQuery, filters, fetchHistory, goToPage]);
 
-  // Save history to localStorage whenever it changes
-  useEffect(() => {
+  const clearHistory = useCallback(async () => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
-    } catch (error) {
-      console.error('Error saving history to localStorage:', error);
+      setLoading(true);
+      await axios.delete(`${API_BASE_URL}/history`);
+      
+      setHistory([]);
+      setPagination(prev => ({
+        ...prev,
+        page: 1,
+        total: 0,
+        totalPages: 0
+      }));
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to clear history');
+      console.error('Error clearing history:', err);
+    } finally {
+      setLoading(false);
     }
-  }, [history]);
-
-  // Detect calculation type based on expression
-  const detectCalculationType = useCallback((expression) => {
-    if (!expression) return 'basic';
-    
-    const trigFunctions = /sin|cos|tan|asin|acos|atan/i;
-    const logFunctions = /log|ln/i;
-    const powerFunctions = /\^|\*\*|sqrt|cbrt/i;
-    const basicOperators = /[+\-*/]/;
-    
-    if (trigFunctions.test(expression)) return 'trigonometry';
-    if (logFunctions.test(expression)) return 'logarithmic';
-    if (powerFunctions.test(expression)) return 'exponential';
-    if (basicOperators.test(expression)) return 'basic';
-    
-    return 'basic';
   }, []);
 
-  // Add new calculation to history
-  const addToHistory = useCallback((expression, result) => {
-    if (!expression || result === undefined || result === null) return;
-    
-    const newEntry = {
-      id: Date.now(),
-      expression: expression.toString(),
-      result: result.toString(),
-      timestamp: new Date().toISOString(),
-      type: detectCalculationType(expression)
-    };
+  const exportHistory = useCallback(async (format = 'csv') => {
+    try {
+      setLoading(true);
+      const response = await axios.get(`${API_BASE_URL}/history/export`, {
+        params: { format, ...filters },
+        responseType: 'blob'
+      });
 
-    setHistory(prevHistory => {
-      const updatedHistory = [newEntry, ...prevHistory];
-      // Limit history size
-      return updatedHistory.slice(0, MAX_HISTORY_ITEMS);
-    });
-  }, [detectCalculationType]);
-
-  // Filter and search history
-  const filteredHistory = useMemo(() => {
-    let filtered = history;
-
-    // Filter by type
-    if (filterType !== 'all') {
-      filtered = filtered.filter(item => item.type === filterType);
+      const blob = new Blob([response.data], {
+        type: format === 'csv' ? 'text/csv' : 'application/json'
+      });
+      
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `history.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to export history');
+      console.error('Error exporting history:', err);
+    } finally {
+      setLoading(false);
     }
+  }, [filters]);
 
-    // Search in expression and result
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase().trim();
-      filtered = filtered.filter(item => 
-        item.expression.toLowerCase().includes(query) ||
-        item.result.toLowerCase().includes(query)
-      );
-    }
+  const refreshHistory = useCallback(() => {
+    fetchHistory(pagination.page, searchQuery, filters);
+  }, [fetchHistory, pagination.page, searchQuery, filters]);
 
-    return filtered;
-  }, [history, searchQuery, filterType]);
-
-  // Clear all history
-  const clearHistory = useCallback(() => {
-    setHistory([]);
+  const resetFilters = useCallback(() => {
     setSearchQuery('');
-    setFilterType('all');
-  }, []);
-
-  // Remove specific history item
-  const removeHistoryItem = useCallback((id) => {
-    setHistory(prevHistory => prevHistory.filter(item => item.id !== id));
-  }, []);
-
-  // Get history statistics
-  const historyStats = useMemo(() => {
-    const stats = {
-      total: history.length,
-      byType: {
-        basic: 0,
-        trigonometry: 0,
-        logarithmic: 0,
-        exponential: 0
-      }
-    };
-
-    history.forEach(item => {
-      if (stats.byType.hasOwnProperty(item.type)) {
-        stats.byType[item.type]++;
-      }
+    setFilters({
+      dateFrom: null,
+      dateTo: null,
+      type: null,
+      status: null
     });
+    setPagination(prev => ({ ...prev, page: 1 }));
+    fetchHistory(1, '', {});
+  }, [fetchHistory]);
 
-    return stats;
-  }, [history]);
-
-  // Export history as JSON
-  const exportHistory = useCallback(() => {
-    const dataStr = JSON.stringify(history, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `calculator_history_${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }, [history]);
-
-  // Import history from JSON
-  const importHistory = useCallback((jsonString) => {
-    try {
-      const importedHistory = JSON.parse(jsonString);
-      if (Array.isArray(importedHistory)) {
-        // Validate imported data structure
-        const validHistory = importedHistory.filter(item => 
-          item && 
-          typeof item.expression === 'string' && 
-          typeof item.result === 'string' &&
-          item.timestamp &&
-          item.id
-        );
-        
-        setHistory(validHistory.slice(0, MAX_HISTORY_ITEMS));
-        return true;
-      }
-    } catch (error) {
-      console.error('Error importing history:', error);
-    }
-    return false;
+  // Initial load
+  useEffect(() => {
+    fetchHistory();
   }, []);
-
-  // Get recent calculations (last 10)
-  const recentCalculations = useMemo(() => {
-    return history.slice(0, 10);
-  }, [history]);
 
   return {
-    history: filteredHistory,
+    replayCalculation,
+    setOnReplayCalculation,
+    // State
+    history,
+    loading,
+    error,
+    pagination,
     searchQuery,
-    setSearchQuery,
-    filterType,
-    setFilterType,
-    addToHistory,
+    filters,
+    
+    // Actions
+    fetchHistory,
+    searchHistory,
+    filterHistory,
+    deleteHistoryItem,
     clearHistory,
-    removeHistoryItem,
-    historyStats,
-    recentCalculations,
     exportHistory,
-    importHistory,
-    hasHistory: history.length > 0
+    refreshHistory,
+    resetFilters,
+    
+    // Pagination actions
+    goToPage,
+    nextPage,
+    prevPage,
+    
+    // Utilities
+    hasNextPage: pagination.page < pagination.totalPages,
+    hasPrevPage: pagination.page > 1,
+    isEmpty: history.length === 0 && !loading,
+    isFirstLoad: loading && pagination.page === 1 && history.length === 0
   };
 };
+
+export default useHistory;
+  // Replay calculation functionality
+  const replayCalculation = useCallback((historyItem) => {
+    if (replayCallback) {
+      replayCallback(historyItem.expression, historyItem.calculation_mode);
+    }
+  }, [replayCallback]);
+
+  // Set callback for replay functionality
+  const setOnReplayCalculation = useCallback((callback) => {
+    setReplayCallback(() => callback);
+  }, []);
