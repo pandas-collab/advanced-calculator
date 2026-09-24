@@ -1,3 +1,5 @@
+import api from "./api.js";
+
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001/api';
 
 class HistoryService {
@@ -12,7 +14,8 @@ class HistoryService {
           expression: calculationData.expression,
           result: calculationData.result,
           timestamp: calculationData.timestamp || new Date().toISOString(),
-          metadata: calculationData.metadata || {}
+          metadata: calculationData.metadata || {},
+          type: calculationData.type || 'basic'
         }),
       });
 
@@ -38,6 +41,8 @@ class HistoryService {
       if (options.sortOrder) queryParams.append('sortOrder', options.sortOrder);
       if (options.dateFrom) queryParams.append('dateFrom', options.dateFrom);
       if (options.dateTo) queryParams.append('dateTo', options.dateTo);
+      
+      if (options.page) queryParams.append('page', options.page);
 
       const queryString = queryParams.toString();
       const url = `${API_BASE_URL}/history${queryString ? `?${queryString}` : ''}`;
@@ -107,6 +112,8 @@ class HistoryService {
       if (options.searchType) queryParams.append('searchType', options.searchType);
       if (options.dateFrom) queryParams.append('dateFrom', options.dateFrom);
       if (options.dateTo) queryParams.append('dateTo', options.dateTo);
+      if (options.type) queryParams.append('type', options.type);
+      if (options.page) queryParams.append('page', options.page);
 
       const response = await fetch(`${API_BASE_URL}/history/search?${queryParams.toString()}`, {
         method: 'GET',
@@ -144,6 +151,7 @@ class HistoryService {
       if (options.includeMetadata !== undefined) {
         queryParams.append('includeMetadata', options.includeMetadata);
       }
+      if (options.type) queryParams.append('type', options.type);
 
       const response = await fetch(`${API_BASE_URL}/history/export?${queryParams.toString()}`, {
         method: 'GET',
@@ -187,6 +195,8 @@ class HistoryService {
       timestamp: item.timestamp ? new Date(item.timestamp) : new Date(),
       formattedDate: item.timestamp ? new Date(item.timestamp).toLocaleString() : '',
       metadata: item.metadata || {},
+      type: item.type || 'basic',
+      calculationMode: item.calculationMode || item.type || 'basic',
       displayText: `${item.expression} = ${item.result}`
     };
   }
@@ -210,6 +220,21 @@ class HistoryService {
       throw new Error('Failed to clear calculation history');
     }
   }
+
+  async getHistoryStats() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/history/stats`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching history stats:', error);
+      throw error;
+    }
+  }
 }
 
 const historyService = new HistoryService();
@@ -220,37 +245,38 @@ export const deleteHistoryItem = (itemId) => historyService.deleteHistoryItem(it
 export const searchHistory = (searchTerm, options) => historyService.searchHistory(searchTerm, options);
 export const exportHistory = (format, options) => historyService.exportHistory(format, options);
 
-export default historyService;
-// Save calculation with expression and result
-export const saveCalculation = async (expression, result, mode = 'standard') => {
-    try {
-        const response = await api.post('/history', {
-            expression,
-            result,
-            calculation_mode: mode,
-            timestamp: new Date().toISOString()
-        });
-        return response.data;
-    } catch (error) {
-        console.error('Error saving calculation:', error);
-        throw error;
-    }
-};
+// Replay calculation functionality
+export const replayCalculation = async (historyItem) => {
+  try {
+    const { expression, calculationMode } = historyItem;
 
-// Get history with all filters
-export const getHistory = async (filters = {}) => {
-    try {
-        const params = new URLSearchParams();
-        Object.keys(filters).forEach(key => {
-            if (filters[key]) params.append(key, filters[key]);
-        });
+    // Re-execute the calculation with the same parameters
+    const response = await api.post('/api/calculate', {
+      expression,
+      mode: calculationMode
+    });
 
-        const response = await api.get(`/history?${params.toString()}`);
-        return response.data;
-    } catch (error) {
-        console.error('Error getting history:', error);
-        throw error;
+    if (response.data.success) {
+      // Save the replayed calculation as a new history entry
+      await saveCalculation({
+        expression,
+        result: response.data.result,
+        calculationMode,
+        timestamp: new Date().toISOString()
+      });
+
+      return {
+        success: true,
+        result: response.data.result,
+        expression
+      };
     }
+
+    throw new Error(response.data.error || 'Calculation failed');
+  } catch (error) {
+    console.error('Replay calculation failed:', error);
+    throw error;
+  }
 };
 
 // Delete history entry
@@ -264,13 +290,4 @@ export const deleteHistoryEntry = async (id) => {
     }
 };
 
-// Export history
-export const exportHistory = async (format = 'json') => {
-    try {
-        const response = await api.get(`/history/export?format=${format}`);
-        return response.data;
-    } catch (error) {
-        console.error('Error exporting history:', error);
-        throw error;
-    }
-};
+export default historyService;
