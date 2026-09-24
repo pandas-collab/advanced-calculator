@@ -1,6 +1,31 @@
 import db from "../config/database.js";
 
 class MemoryService {
+  constructor() {
+    this.initializeTables();
+  }
+
+  async initializeTables() {
+    try {
+      await db.run(`
+        CREATE TABLE IF NOT EXISTS memory_slots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          slot_name TEXT NOT NULL DEFAULT 'default',
+          value TEXT DEFAULT '0',
+          metadata TEXT DEFAULT '{}',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, name),
+          UNIQUE(user_id, slot_name)
+        )
+      `);
+    } catch (error) {
+      console.error('Failed to initialize memory_slots table:', error);
+    }
+  }
+
   // Create memory slot in database
   async createMemorySlot(userId, name, value, metadata = {}) {
     const query = `
@@ -35,10 +60,12 @@ class MemoryService {
     const query = `SELECT * FROM memory_slots WHERE user_id = ? ORDER BY name`;
     const rows = await db.all(query, [userId]);
 
-    return rows.map(row => ({
-      ...row,
-      metadata: JSON.parse(row.metadata || '{}')
-    }));
+    const slots = {};
+    rows.forEach(row => {
+      slots[row.slot_name || row.name] = parseFloat(row.value);
+    });
+
+    return slots;
   }
 
   // Update memory slot value
@@ -62,6 +89,124 @@ class MemoryService {
   async clearUserMemory(userId) {
     const query = `DELETE FROM memory_slots WHERE user_id = ?`;
     return await db.run(query, [userId]);
+  }
+
+  async addToMemory(userId, slotName = 'default', value) {
+    try {
+      // Get current value
+      const existing = await db.get(
+        'SELECT value FROM memory_slots WHERE user_id = ? AND slot_name = ?',
+        [userId, slotName]
+      );
+
+      const currentValue = existing ? parseFloat(existing.value) : 0;
+      const newValue = currentValue + parseFloat(value);
+
+      // Upsert the memory slot
+      await db.run(`
+        INSERT INTO memory_slots (user_id, slot_name, value, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(user_id, slot_name) DO UPDATE SET 
+          value = excluded.value, 
+          updated_at = datetime('now')
+      `, [userId, slotName, newValue]);
+
+      return newValue;
+    } catch (error) {
+      console.error('Error adding to memory:', error);
+      throw error;
+    }
+  }
+
+  async subtractFromMemory(userId, slotName = 'default', value) {
+    try {
+      // Get current value
+      const existing = await db.get(
+        'SELECT value FROM memory_slots WHERE user_id = ? AND slot_name = ?',
+        [userId, slotName]
+      );
+
+      const currentValue = existing ? parseFloat(existing.value) : 0;
+      const newValue = currentValue - parseFloat(value);
+
+      // Upsert the memory slot
+      await db.run(`
+        INSERT INTO memory_slots (user_id, slot_name, value, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(user_id, slot_name) DO UPDATE SET 
+          value = excluded.value, 
+          updated_at = datetime('now')
+      `, [userId, slotName, newValue]);
+
+      return newValue;
+    } catch (error) {
+      console.error('Error subtracting from memory:', error);
+      throw error;
+    }
+  }
+
+  async recallMemory(userId, slotName = 'default') {
+    try {
+      const row = await db.get(
+        'SELECT value, updated_at FROM memory_slots WHERE user_id = ? AND slot_name = ?',
+        [userId, slotName]
+      );
+
+      if (!row) {
+        return { value: 0, metadata: { slot_name: slotName, last_accessed: null } };
+      }
+
+      return {
+        value: parseFloat(row.value),
+        metadata: {
+          slot_name: slotName,
+          last_accessed: row.updated_at
+        }
+      };
+    } catch (error) {
+      console.error('Error recalling memory:', error);
+      throw error;
+    }
+  }
+
+  async clearMemory(userId, slotName = 'default') {
+    try {
+      await db.run(`
+        INSERT INTO memory_slots (user_id, slot_name, value, updated_at)
+        VALUES (?, ?, 0, datetime('now'))
+        ON CONFLICT(user_id, slot_name) DO UPDATE SET 
+          value = 0, 
+          updated_at = datetime('now')
+      `, [userId, slotName]);
+
+      return 0;
+    } catch (error) {
+      console.error('Error clearing memory:', error);
+      throw error;
+    }
+  }
+
+  async getMemoryMetadata(userId, slotName = 'default') {
+    try {
+      const row = await db.get(
+        'SELECT slot_name, value, created_at, updated_at FROM memory_slots WHERE user_id = ? AND slot_name = ?',
+        [userId, slotName]
+      );
+
+      if (!row) {
+        return null;
+      }
+
+      return {
+        slot_name: row.slot_name,
+        value: parseFloat(row.value),
+        created_at: row.created_at,
+        updated_at: row.updated_at
+      };
+    } catch (error) {
+      console.error('Error getting memory metadata:', error);
+      throw error;
+    }
   }
 
   // Memory arithmetic operations
