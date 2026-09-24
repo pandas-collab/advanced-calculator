@@ -1,6 +1,6 @@
 const db = require("../config/database.js");
 const { Op } = require('sequelize');
-const { History, User } = require('../models');
+const { History, User, Memory } = require('../models');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -98,6 +98,21 @@ class HistoryService {
     }
   }
 
+  async saveToHistory(userId, data) {
+    try {
+      const historyItem = await History.create({
+        userId,
+        query: data.query,
+        response: data.response,
+        metadata: data.metadata || {},
+        timestamp: new Date()
+      });
+      return historyItem;
+    } catch (error) {
+      throw new Error(`Failed to save history: ${error.message}`);
+    }
+  }
+
   async getUserHistory(userId, options = {}) {
     try {
       const {
@@ -147,12 +162,15 @@ class HistoryService {
 
       return {
         histories: rows,
+        items: rows,
         pagination: {
           total: count,
           page: parseInt(page),
           limit: parseInt(limit),
           totalPages: Math.ceil(count / limit)
-        }
+        },
+        total: count,
+        totalPages: Math.ceil(count / limit)
       };
     } catch (error) {
       throw new Error(`Failed to get user history: ${error.message}`);
@@ -180,6 +198,41 @@ class HistoryService {
     }
   }
 
+  async deleteHistoryItem(userId, historyId) {
+    try {
+      const deleted = await History.destroy({
+        where: {
+          id: historyId,
+          userId
+        }
+      });
+
+      if (deleted === 0) {
+        throw new Error('History item not found or unauthorized');
+      }
+
+      return { success: true, message: 'History item deleted successfully' };
+    } catch (error) {
+      throw new Error(`Failed to delete history item: ${error.message}`);
+    }
+  }
+
+  async clearUserHistory(userId) {
+    try {
+      const deletedCount = await History.destroy({
+        where: { userId }
+      });
+
+      return {
+        success: true,
+        message: `Cleared ${deletedCount} history items`,
+        deletedCount
+      };
+    } catch (error) {
+      throw new Error(`Failed to clear user history: ${error.message}`);
+    }
+  }
+
   async searchHistory(userId, searchTerm, options = {}) {
     try {
       const {
@@ -197,7 +250,9 @@ class HistoryService {
         [Op.or]: [
           { title: { [Op.iLike]: `%${searchTerm}%` } },
           { description: { [Op.iLike]: `%${searchTerm}%` } },
-          { metadata: { [Op.iLike]: `%${searchTerm}%` } }
+          { metadata: { [Op.iLike]: `%${searchTerm}%` } },
+          { query: { [Op.iLike]: `%${searchTerm}%` } },
+          { response: { [Op.iLike]: `%${searchTerm}%` } }
         ]
       };
 
@@ -221,12 +276,15 @@ class HistoryService {
 
       return {
         histories: rows,
+        items: rows,
         pagination: {
           total: count,
           page: parseInt(page),
           limit: parseInt(limit),
           totalPages: Math.ceil(count / limit)
         },
+        total: count,
+        totalPages: Math.ceil(count / limit),
         searchTerm
       };
     } catch (error) {
@@ -314,6 +372,85 @@ class HistoryService {
       };
     } catch (error) {
       throw new Error(`Failed to get history statistics: ${error.message}`);
+    }
+  }
+
+  async getMemorySlots(userId) {
+    try {
+      const memorySlots = await Memory.findAll({
+        where: { userId },
+        order: [['slotNumber', 'ASC']],
+        attributes: ['id', 'slotNumber', 'title', 'content', 'metadata', 'createdAt', 'updatedAt']
+      });
+
+      const slots = Array.from({ length: 10 }, (_, index) => {
+        const slotNumber = index + 1;
+        const existingSlot = memorySlots.find(slot => slot.slotNumber === slotNumber);
+        
+        return existingSlot || {
+          slotNumber,
+          title: null,
+          content: null,
+          metadata: {},
+          isEmpty: true
+        };
+      });
+
+      return slots;
+    } catch (error) {
+      throw new Error(`Failed to get memory slots: ${error.message}`);
+    }
+  }
+
+  async saveToMemory(userId, slotNumber, data) {
+    try {
+      if (slotNumber < 1 || slotNumber > 10) {
+        throw new Error('Slot number must be between 1 and 10');
+      }
+
+      const [memorySlot, created] = await Memory.upsert({
+        userId,
+        slotNumber,
+        title: data.title,
+        content: data.content,
+        metadata: data.metadata || {}
+      }, {
+        returning: true
+      });
+
+      return {
+        success: true,
+        message: created ? 'Memory slot created successfully' : 'Memory slot updated successfully',
+        memorySlot
+      };
+    } catch (error) {
+      throw new Error(`Failed to save to memory: ${error.message}`);
+    }
+  }
+
+  async clearMemorySlot(userId, slotNumber) {
+    try {
+      if (slotNumber < 1 || slotNumber > 10) {
+        throw new Error('Slot number must be between 1 and 10');
+      }
+
+      const deleted = await Memory.destroy({
+        where: {
+          userId,
+          slotNumber
+        }
+      });
+
+      if (deleted === 0) {
+        throw new Error('Memory slot not found or already empty');
+      }
+
+      return {
+        success: true,
+        message: 'Memory slot cleared successfully'
+      };
+    } catch (error) {
+      throw new Error(`Failed to clear memory slot: ${error.message}`);
     }
   }
 }
@@ -412,231 +549,35 @@ const getHistory = async (options = {}) => {
   const paginatedHistory = history.slice(startIndex, endIndex);
 
   return {
-    data: paginatedHistory,
+    items: paginatedHistory,
     pagination: {
-      currentPage: page,
-      totalPages,
-      totalItems,
-      itemsPerPage: limit,
-      hasNextPage: page < totalPages,
-      hasPreviousPage: page > 1
+      total: totalItems,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      totalPages: totalPages
     }
   };
-};
-
-// Search history by expression or result
-const searchHistory = async (query, options = {}) => {
-  const {
-    page = 1,
-    limit = 20,
-    sortBy = 'timestamp',
-    sortOrder = 'desc'
-  } = options;
-
-  let history = await loadHistory();
-
-  if (!query || query.trim() === '') {
-    return getHistory(options);
-  }
-
-  const searchTerm = query.toLowerCase().trim();
-
-  // Search in expression, result, and type fields
-  history = history.filter(item => {
-    const searchFields = [
-      item.expression || '',
-      item.result?.toString() || '',
-      item.type || '',
-      item.unit || ''
-    ];
-
-    return searchFields.some(field => 
-      field.toLowerCase().includes(searchTerm)
-    );
-  });
-
-  // Apply sorting
-  history.sort((a, b) => {
-    let aValue = a[sortBy];
-    let bValue = b[sortBy];
-
-    if (sortBy === 'timestamp') {
-      aValue = new Date(aValue);
-      bValue = new Date(bValue);
-    }
-
-    if (sortOrder === 'desc') {
-      return bValue > aValue ? 1 : -1;
-    } else {
-      return aValue > bValue ? 1 : -1;
-    }
-  });
-
-  // Apply pagination
-  const totalItems = history.length;
-  const totalPages = Math.ceil(totalItems / limit);
-  const startIndex = (page - 1) * limit;
-  const endIndex = startIndex + limit;
-  const paginatedHistory = history.slice(startIndex, endIndex);
-
-  return {
-    data: paginatedHistory,
-    pagination: {
-      currentPage: page,
-      totalPages,
-      totalItems,
-      itemsPerPage: limit,
-      hasNextPage: page < totalPages,
-      hasPreviousPage: page > 1
-    },
-    query: searchTerm
-  };
-};
-
-// Save calculation history with expression, result, timestamp, and mode
-const saveCalculation = async (expression, result, mode = 'standard') => {
-    try {
-        if (db && db.run) {
-            const query = `
-                INSERT INTO calculation_history (expression, result, calculation_mode, timestamp)
-                VALUES (?, ?, ?, ?)
-            `;
-            const timestamp = new Date().toISOString();
-            await db.run(query, [expression, result, mode, timestamp]);
-            return { success: true, timestamp };
-        } else {
-            // Fallback to file system
-            const calculation = {
-                expression,
-                result,
-                type: mode,
-                timestamp: new Date().toISOString()
-            };
-            const entry = await addToHistory(calculation);
-            return { success: true, timestamp: entry.timestamp };
-        }
-    } catch (error) {
-        console.error('Error saving calculation:', error);
-        throw error;
-    }
-};
-
-// Delete history entry
-const deleteHistoryEntry = async (id) => {
-    try {
-        if (db && db.run) {
-            await db.run('DELETE FROM calculation_history WHERE id = ?', [id]);
-            return { success: true };
-        } else {
-            // Fallback to file system
-            return await deleteHistoryItem(id);
-        }
-    } catch (error) {
-        console.error('Error deleting history entry:', error);
-        throw error;
-    }
-};
-
-// Export history entries
-const exportHistory = async (format = 'json') => {
-    try {
-        let results;
-        if (db && db.all) {
-            results = await db.all('SELECT * FROM calculation_history ORDER BY timestamp DESC');
-        } else {
-            results = await loadHistory();
-        }
-        
-        if (format === 'csv') {
-            const csv = results.map(row =>
-                `${row.timestamp},${row.expression},${row.result},${row.calculation_mode || row.type}`
-            ).join('\n');
-            return `timestamp,expression,result,mode\n${csv}`;
-        }
-        return results;
-    } catch (error) {
-        console.error('Error exporting history:', error);
-        throw error;
-    }
-};
-
-// Get history statistics
-const getHistoryStats = async () => {
-  const history = await loadHistory();
-  
-  const stats = {
-    totalCalculations: history.length,
-    calculationTypes: {},
-    recentActivity: {
-      today: 0,
-      thisWeek: 0,
-      thisMonth: 0
-    },
-    mostUsedOperations: {},
-    averageCalculationsPerDay: 0
-  };
-
-  if (history.length === 0) {
-    return stats;
-  }
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-  // Count by type and recent activity
-  history.forEach(item => {
-    const itemDate = new Date(item.timestamp);
-    
-    // Count by type
-    stats.calculationTypes[item.type] = (stats.calculationTypes[item.type] || 0) + 1;
-    
-    // Recent activity
-    if (itemDate >= today) {
-      stats.recentActivity.today++;
-    }
-    if (itemDate >= weekAgo) {
-      stats.recentActivity.thisWeek++;
-    }
-    if (itemDate >= monthAgo) {
-      stats.recentActivity.thisMonth++;
-    }
-
-    // Most used operations (extract from expression)
-    if (item.expression) {
-      const operators = item.expression.match(/[+\-*/^√%]/g) || [];
-      operators.forEach(op => {
-        stats.mostUsedOperations[op] = (stats.mostUsedOperations[op] || 0) + 1;
-      });
-    }
-  });
-
-  // Calculate average calculations per day
-  if (history.length > 0) {
-    const oldestDate = new Date(history[history.length - 1].timestamp);
-    const daysDiff = Math.max(1, Math.ceil((now - oldestDate) / (1000 * 60 * 60 * 24)));
-    stats.averageCalculationsPerDay = Math.round((history.length / daysDiff) * 100) / 100;
-  }
-
-  return stats;
 };
 
 const historyService = new HistoryService();
 
 module.exports = {
-  createHistory: historyService.createHistory.bind(historyService),
-  getUserHistory: historyService.getUserHistory.bind(historyService),
-  deleteHistory: historyService.deleteHistory.bind(historyService),
-  searchHistory,
-  getHistoryById: historyService.getHistoryById.bind(historyService),
-  bulkDeleteHistory: historyService.bulkDeleteHistory.bind(historyService),
-  getHistoryStats,
   addToHistory,
-  getHistory,
   deleteHistoryItem,
   clearHistory,
-  saveCalculation,
-  deleteHistoryEntry,
-  exportHistory
+  loadHistory,
+  saveHistory,
+  getHistory,
+  saveToHistory: (userId, data) => historyService.saveToHistory(userId, data),
+  getUserHistory: (userId, options) => historyService.getUserHistory(userId, options),
+  searchHistory: (userId, searchTerm, options) => historyService.searchHistory(userId, searchTerm, options),
+  deleteHistory: (historyId, userId) => historyService.deleteHistory(historyId, userId),
+  clearUserHistory: (userId) => historyService.clearUserHistory(userId),
+  getMemorySlots: (userId) => historyService.getMemorySlots(userId),
+  saveToMemory: (userId, slotNumber, data) => historyService.saveToMemory(userId, slotNumber, data),
+  clearMemorySlot: (userId, slotNumber) => historyService.clearMemorySlot(userId, slotNumber),
+  createHistory: (userId, data) => historyService.createHistory(userId, data),
+  getHistoryById: (historyId, userId) => historyService.getHistoryById(historyId, userId),
+  bulkDeleteHistory: (historyIds, userId) => historyService.bulkDeleteHistory(historyIds, userId),
+  getHistoryStats: (userId, options) => historyService.getHistoryStats(userId, options)
 };
