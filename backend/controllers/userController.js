@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
 
@@ -153,6 +154,29 @@ const getUserStats = async (req, res) => {
   }
 };
 
+const getUserById = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ message: 'User ID is required' });
+    }
+
+    const user = await User.findById(userId).select('-password -email -phone');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json(user);
+  } catch (error) {
+    console.error(error.message);
+    if (error.kind === 'ObjectId') {
+      return res.status(400).json({ message: 'Invalid user ID' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 const calculateProfileCompletion = (user) => {
   const fields = ['name', 'email', 'phone', 'bio', 'avatar'];
   const completedFields = fields.filter(field => user[field] && user[field].trim() !== '');
@@ -164,5 +188,6 @@ module.exports = {
   updateProfile,
   changePassword,
   deleteAccount,
-  getUserStats
+  getUserStats,
+  getUserById
 };

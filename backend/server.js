@@ -4,10 +4,11 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 // Security middleware
 app.use(helmet({
@@ -60,21 +61,24 @@ const initializeDatabase = async () => {
 };
 
 // Import routes
-const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const calculationRoutes = require('./routes/calculations');
+const historyRoutes = require('./routes/history');
+const authRoutes = require('./routes/auth');
 
-// Route middleware
+// Mount routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/calculations', calculationRoutes);
+app.use('/api/history', historyRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     message: 'Server is running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 

@@ -44,6 +44,23 @@ const loginValidation = [
     .withMessage('Password is required')
 ];
 
+// Generate tokens
+const generateTokens = (userId) => {
+  const accessToken = jwt.sign(
+    { userId },
+    process.env.JWT_ACCESS_SECRET,
+    { expiresIn: '15m' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { userId },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+  
+  return { accessToken, refreshToken };
+};
+
 // @route   POST /api/auth/register
 // @desc    Register user
 // @access  Public
@@ -82,7 +99,14 @@ router.post('/register', authLimiter, registerValidation, async (req, res) => {
 
     await user.save();
 
-    // Generate JWT
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(user._id);
+
+    // Store refresh token in user document
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    // Generate JWT for backward compatibility
     const payload = {
       user: {
         id: user.id,
@@ -111,6 +135,15 @@ router.post('/register', authLimiter, registerValidation, async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email
+      },
+      data: {
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name
+        },
+        accessToken,
+        refreshToken
       }
     });
 
@@ -167,9 +200,15 @@ router.post('/login', authLimiter, loginValidation, async (req, res) => {
 
     // Update last login
     user.lastLogin = new Date();
+
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(user._id);
+
+    // Store refresh token
+    user.refreshToken = refreshToken;
     await user.save();
 
-    // Generate JWT
+    // Generate JWT for backward compatibility
     const payload = {
       user: {
         id: user.id,
@@ -199,6 +238,15 @@ router.post('/login', authLimiter, loginValidation, async (req, res) => {
         name: user.name,
         email: user.email,
         lastLogin: user.lastLogin
+      },
+      data: {
+        user: {
+          id: user._id,
+          email: user.email,
+          name: user.name
+        },
+        accessToken,
+        refreshToken
       }
     });
 
@@ -214,9 +262,14 @@ router.post('/login', authLimiter, loginValidation, async (req, res) => {
 // @route   POST /api/auth/logout
 // @desc    Logout user
 // @access  Private
-router.post('/logout', auth, (req, res) => {
-router.post("/refresh", authController.refresh);
+router.post('/logout', auth, async (req, res) => {
   try {
+    const user = await User.findById(req.user.id || req.user.userId);
+    if (user) {
+      user.refreshToken = null;
+      await user.save();
+    }
+
     res.clearCookie('token', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -237,12 +290,71 @@ router.post("/refresh", authController.refresh);
   }
 });
 
+// @route   POST /api/auth/refresh
+// @desc    Refresh tokens
+// @access  Public
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'Refresh token is required'
+      });
+    }
+
+    // Verify refresh token
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid refresh token'
+      });
+    }
+
+    // Find user and verify stored refresh token
+    const user = await User.findById(decoded.userId);
+    if (!user || user.refreshToken !== refreshToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid refresh token'
+      });
+    }
+
+    // Generate new tokens
+    const tokens = generateTokens(user._id);
+
+    // Update stored refresh token
+    user.refreshToken = tokens.refreshToken;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Tokens refreshed successfully',
+      data: {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken
+      }
+    });
+
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+});
+
 // @route   GET /api/auth/me
 // @desc    Get current user
 // @access  Private
 router.get('/me', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const user = await User.findById(req.user.id || req.user.userId).select('-password');
     
     if (!user) {
       return res.status(404).json({
@@ -296,7 +408,7 @@ router.put('/change-password', auth, [
 
     const { currentPassword, newPassword } = req.body;
 
-    const user = await User.findById(req.user.id).select('+password');
+    const user = await User.findById(req.user.id || req.user.userId).select('+password');
     
     if (!user) {
       return res.status(404).json({

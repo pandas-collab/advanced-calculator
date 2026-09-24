@@ -33,7 +33,7 @@ const register = async (req, res) => {
       });
     }
 
-    const { email, password, firstName, lastName } = req.body;
+    const { email, password, firstName, lastName, name } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -53,7 +53,8 @@ const register = async (req, res) => {
       email,
       password: hashedPassword,
       firstName,
-      lastName
+      lastName,
+      name
     });
 
     await user.save();
@@ -81,7 +82,8 @@ const register = async (req, res) => {
           id: user._id,
           email: user.email,
           firstName: user.firstName,
-          lastName: user.lastName
+          lastName: user.lastName,
+          name: user.name
         },
         accessToken
       }
@@ -153,7 +155,8 @@ const login = async (req, res) => {
           id: user._id,
           email: user.email,
           firstName: user.firstName,
-          lastName: user.lastName
+          lastName: user.lastName,
+          name: user.name
         },
         accessToken
       }
@@ -171,7 +174,8 @@ const login = async (req, res) => {
 // Logout user
 const logout = async (req, res) => {
   try {
-    const { refreshToken } = req.cookies;
+    const { refreshToken } = req.cookies || req.body;
+    const userId = req.user?.id;
     
     if (refreshToken) {
       // Remove refresh token from user record
@@ -179,6 +183,12 @@ const logout = async (req, res) => {
         { refreshToken },
         { $unset: { refreshToken: 1 } }
       );
+    } else if (userId) {
+      const user = await User.findById(userId);
+      if (user) {
+        user.refreshToken = null;
+        await user.save();
+      }
     }
 
     // Clear refresh token cookie
@@ -205,7 +215,7 @@ const logout = async (req, res) => {
 // Refresh access token
 const refreshToken = async (req, res) => {
   try {
-    const { refreshToken } = req.cookies;
+    const { refreshToken } = req.cookies || req.body;
 
     if (!refreshToken) {
       return res.status(401).json({
@@ -305,7 +315,24 @@ const verifyToken = async (req, res, next) => {
 
     // Add user to request object
     req.user = user;
-    next();
+    
+    if (next) {
+      next();
+    } else {
+      res.status(200).json({
+        success: true,
+        message: 'Token is valid',
+        data: {
+          user: {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName
+          }
+        }
+      });
+    }
 
   } catch (error) {
     console.error('Token verification error:', error);

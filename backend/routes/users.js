@@ -16,7 +16,7 @@ router.get('/profile', auth, async (req, res) => {
     }
     res.json(user);
   } catch (error) {
-    console.error(error);
+    console.error('Error fetching user profile:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -26,6 +26,8 @@ router.put('/profile', [
   auth,
   body('name').optional().trim().isLength({ min: 2 }).withMessage('Name must be at least 2 characters'),
   body('email').optional().isEmail().withMessage('Please provide a valid email'),
+  body('firstName').optional().trim().isLength({ min: 1 }).withMessage('First name is required'),
+  body('lastName').optional().trim().isLength({ min: 1 }).withMessage('Last name is required'),
   body('phone').optional().isMobilePhone().withMessage('Please provide a valid phone number')
 ], async (req, res) => {
   try {
@@ -34,7 +36,7 @@ router.put('/profile', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, email, phone, bio, location } = req.body;
+    const { name, email, phone, bio, location, firstName, lastName } = req.body;
     
     // Check if email is already taken by another user
     if (email) {
@@ -50,6 +52,9 @@ router.put('/profile', [
     if (phone) updateFields.phone = phone;
     if (bio !== undefined) updateFields.bio = bio;
     if (location) updateFields.location = location;
+    if (firstName !== undefined) updateFields.firstName = firstName;
+    if (lastName !== undefined) updateFields.lastName = lastName;
+    updateFields.updatedAt = new Date();
 
     const user = await User.findByIdAndUpdate(
       req.user.id,
@@ -63,7 +68,7 @@ router.put('/profile', [
 
     res.json(user);
   } catch (error) {
-    console.error(error);
+    console.error('Error updating user profile:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -95,28 +100,46 @@ router.put('/password', [
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-    await User.findByIdAndUpdate(req.user.id, { password: hashedPassword });
+    user.password = hashedPassword;
+    user.updatedAt = new Date();
+    await user.save();
 
     res.json({ message: 'Password updated successfully' });
   } catch (error) {
-    console.error(error);
+    console.error('Error updating password:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // Delete user account
-router.delete('/account', auth, async (req, res) => {
+router.delete('/account', [
+  auth,
+  body('password').optional().notEmpty().withMessage('Password is required to delete account')
+], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    // If password is provided, verify it
+    if (req.body.password) {
+      const isMatch = await bcrypt.compare(req.body.password, user.password);
+      if (!isMatch) {
+        return res.status(400).json({ message: 'Password is incorrect' });
+      }
     }
 
     await User.findByIdAndDelete(req.user.id);
 
     res.json({ message: 'Account deleted successfully' });
   } catch (error) {
-    console.error(error);
+    console.error('Error deleting account:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
