@@ -1,4 +1,5 @@
 const db = require("../config/database.js");
+const pool = require('../config/database');
 const { Op } = require('sequelize');
 const { History, User, Memory } = require('../models');
 const mongoose = require('mongoose');
@@ -342,6 +343,23 @@ const searchHistoryByQuery = async ({ query, dateFrom, dateTo, calculationMode, 
 };
 
 class HistoryService {
+  async saveCalculation(userId, calculation) {
+    const { expression, result, calculationType } = calculation;
+    const query = `
+      INSERT INTO calculation_history (user_id, expression, result, calculation_type, created_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      RETURNING id, expression, result, calculation_type, created_at
+    `;
+    
+    try {
+      const values = [userId, expression, result, calculationType || 'basic'];
+      const { rows } = await pool.query(query, values);
+      return rows[0];
+    } catch (error) {
+      throw new Error(`Failed to save calculation: ${error.message}`);
+    }
+  }
+
   async createHistory(userId, data) {
     try {
       const historyRecord = await History.create({
@@ -372,20 +390,91 @@ class HistoryService {
   }
 
   async getUserHistory(userId, options = {}) {
-    try {
-      const {
-        page = 1,
-        limit = 20,
-        sortBy = 'timestamp',
-        sortOrder = 'DESC',
-        startDate,
-        endDate,
-        type,
-        status,
-        operation = null
-      } = options;
+    const { 
+      page = 1, 
+      limit = 20, 
+      calculationType = null,
+      startDate = null,
+      endDate = null,
+      sortBy = 'created_at',
+      sortOrder = 'DESC',
+      type,
+      status,
+      operation = null
+    } = options;
 
-      const offset = (page - 1) * limit;
+    const offset = (page - 1) * limit;
+
+    // PostgreSQL implementation (from THEIRS)
+    if (pool) {
+      let whereConditions = ['user_id = $1'];
+      let queryParams = [userId];
+      let paramCount = 1;
+
+      if (calculationType) {
+        paramCount++;
+        whereConditions.push(`calculation_type = $${paramCount}`);
+        queryParams.push(calculationType);
+      }
+
+      if (startDate) {
+        paramCount++;
+        whereConditions.push(`created_at >= $${paramCount}`);
+        queryParams.push(startDate);
+      }
+
+      if (endDate) {
+        paramCount++;
+        whereConditions.push(`created_at <= $${paramCount}`);
+        queryParams.push(endDate);
+      }
+
+      const whereClause = whereConditions.join(' AND ');
+      const validSortFields = ['created_at', 'expression', 'result', 'calculation_type'];
+      const validSortOrders = ['ASC', 'DESC'];
+      
+      const safeSortBy = validSortFields.includes(sortBy) ? sortBy : 'created_at';
+      const safeSortOrder = validSortOrders.includes(sortOrder.toUpperCase()) ? sortOrder.toUpperCase() : 'DESC';
+
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM calculation_history
+        WHERE ${whereClause}
+      `;
+
+      const dataQuery = `
+        SELECT id, expression, result, calculation_type, created_at
+        FROM calculation_history
+        WHERE ${whereClause}
+        ORDER BY ${safeSortBy} ${safeSortOrder}
+        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
+      `;
+
+      try {
+        const countResult = await pool.query(countQuery, queryParams);
+        const total = parseInt(countResult.rows[0].total);
+        
+        queryParams.push(limit, offset);
+        const dataResult = await pool.query(dataQuery, queryParams);
+
+        return {
+          data: dataResult.rows,
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total,
+            pages: Math.ceil(total / limit),
+            hasNext: page * limit < total,
+            hasPrev: page > 1
+          }
+        };
+      } catch (error) {
+        throw new Error(`Failed to retrieve user history: ${error.message}`);
+      }
+    }
+
+    // Sequelize implementation (from OURS)
+    try {
       const where = { userId };
 
       // Add date range filter
@@ -419,230 +508,88 @@ class HistoryService {
         ]
       });
 
-      // Also try MongoDB approach for compatibility
-      if (!userId) {
-        throw new Error('User ID is required');
-      }
-
-      const skip = (page - 1) * limit;
-      const sort = {};
-      sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
-      let mongoQuery = { userId: new mongoose.Types.ObjectId(userId) };
-
-      if (operation) {
-        mongoQuery.operation = operation;
-      }
-
-      const [mongoHistory, mongoTotalCount] = await Promise.all([
-        MongoHistory.find(mongoQuery)
-          .sort(sort)
-          .skip(skip)
-          .limit(parseInt(limit))
-          .lean(),
-        MongoHistory.countDocuments(mongoQuery)
-      ]);
-
-      const mongoTotalPages = Math.ceil(mongoTotalCount / limit);
-
       return {
-        histories: rows,
-        items: rows,
+        data: rows,
         pagination: {
-          total: count,
           page: parseInt(page),
           limit: parseInt(limit),
-          totalPages: Math.ceil(count / limit)
-        },
-        total: count,
-        totalPages: Math.ceil(count / limit),
-        mongoData: {
-          history: mongoHistory,
-          pagination: {
-            currentPage: parseInt(page),
-            totalPages: mongoTotalPages,
-            totalItems: mongoTotalCount,
-            itemsPerPage: parseInt(limit),
-            hasNextPage: page < mongoTotalPages,
-            hasPrevPage: page > 1
-          }
+          total: count,
+          pages: Math.ceil(count / limit),
+          hasNext: page * limit < count,
+          hasPrev: page > 1
         }
       };
     } catch (error) {
-      throw new Error(`Failed to get user history: ${error.message}`);
+      throw new Error(`Failed to retrieve user history: ${error.message}`);
     }
   }
 
-  async deleteHistory(historyId, userId = null) {
+  async deleteCalculation(userId, calculationId) {
+    const query = `
+      DELETE FROM calculation_history
+      WHERE id = $1 AND user_id = $2
+      RETURNING id
+    `;
+
     try {
-      const where = { id: historyId };
+      const { rows } = await pool.query(query, [calculationId, userId]);
       
-      // If userId is provided, ensure user can only delete their own history
-      if (userId) {
-        where.userId = userId;
+      if (rows.length === 0) {
+        throw new Error('Calculation not found or unauthorized');
       }
 
-      const deleted = await History.destroy({ where });
-      
-      if (deleted === 0) {
-        throw new Error('History record not found or access denied');
-      }
-
-      return { success: true, message: 'History record deleted successfully' };
+      return { success: true, deletedId: rows[0].id };
     } catch (error) {
-      throw new Error(`Failed to delete history record: ${error.message}`);
+      throw new Error(`Failed to delete calculation: ${error.message}`);
     }
   }
 
-  async deleteHistoryItem(userId, historyId) {
-    try {
-      const deleted = await History.destroy({
-        where: {
-          id: historyId,
-          userId
-        }
-      });
+  async clearUserHistory(userId, calculationType = null) {
+    let query = 'DELETE FROM calculation_history WHERE user_id = $1';
+    let params = [userId];
 
-      if (deleted === 0) {
-        throw new Error('History item not found or unauthorized');
-      }
-
-      return { success: true, message: 'History item deleted successfully' };
-    } catch (error) {
-      throw new Error(`Failed to delete history item: ${error.message}`);
+    if (calculationType) {
+      query += ' AND calculation_type = $2';
+      params.push(calculationType);
     }
-  }
 
-  async clearUserHistory(userId) {
+    query += ' RETURNING COUNT(*) as deleted_count';
+
     try {
-      const deletedCount = await History.destroy({
-        where: { userId }
-      });
-
-      return {
-        success: true,
-        message: `Cleared ${deletedCount} history items`,
-        deletedCount
+      const { rows } = await pool.query(query, params);
+      return { 
+        success: true, 
+        deletedCount: parseInt(rows[0].deleted_count || 0),
+        message: `Cleared ${rows[0].deleted_count || 0} calculations from history`
       };
     } catch (error) {
       throw new Error(`Failed to clear user history: ${error.message}`);
     }
   }
 
-  async searchHistory(userId, searchTerm, options = {}) {
+  async getCalculationById(userId, calculationId) {
+    const query = `
+      SELECT id, expression, result, calculation_type, created_at
+      FROM calculation_history
+      WHERE id = $1 AND user_id = $2
+    `;
+
     try {
-      const {
-        page = 1,
-        limit = 20,
-        sortBy = 'timestamp',
-        sortOrder = 'DESC',
-        type,
-        status,
-        operation = null
-      } = options;
-
-      const offset = (page - 1) * limit;
-      const where = {
-        userId,
-        [Op.or]: [
-          { title: { [Op.iLike]: `%${searchTerm}%` } },
-          { description: { [Op.iLike]: `%${searchTerm}%` } },
-          { metadata: { [Op.iLike]: `%${searchTerm}%` } },
-          { query: { [Op.iLike]: `%${searchTerm}%` } },
-          { response: { [Op.iLike]: `%${searchTerm}%` } }
-        ]
-      };
-
-      // Add additional filters
-      if (type) where.type = type;
-      if (status) where.status = status;
-
-      const { count, rows } = await History.findAndCountAll({
-        where,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        order: [[sortBy, sortOrder.toUpperCase()]],
-        include: [
-          {
-            model: User,
-            as: 'user',
-            attributes: ['id', 'username', 'email']
-          }
-        ]
-      });
-
-      // MongoDB search
-      const skip = (page - 1) * limit;
-      const sort = {};
-      sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
-      let mongoQuery = {
-        userId: new mongoose.Types.ObjectId(userId)
-      };
-
-      if (operation) {
-        mongoQuery.operation = operation;
+      const { rows } = await pool.query(query, [calculationId, userId]);
+      
+      if (rows.length === 0) {
+        return null;
       }
 
-      if (searchTerm && searchTerm.trim()) {
-        mongoQuery.$or = [
-          { calculation: { $regex: searchTerm, $options: 'i' } },
-          { result: { $regex: searchTerm.toString(), $options: 'i' } }
-        ];
-      }
-
-      const [mongoResults, mongoTotalCount] = await Promise.all([
-        MongoHistory.find(mongoQuery)
-          .sort(sort)
-          .skip(skip)
-          .limit(parseInt(limit))
-          .lean(),
-        MongoHistory.countDocuments(mongoQuery)
-      ]);
-
-      const mongoTotalPages = Math.ceil(mongoTotalCount / limit);
-
-      return {
-        histories: rows,
-        items: rows,
-        pagination: {
-          total: count,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(count / limit)
-        },
-        total: count,
-        totalPages: Math.ceil(count / limit),
-        searchTerm,
-        mongoData: {
-          results: mongoResults,
-          searchQuery: searchTerm,
-          pagination: {
-            currentPage: parseInt(page),
-            totalPages: mongoTotalPages,
-            totalItems: mongoTotalCount,
-            itemsPerPage: parseInt(limit),
-            hasNextPage: page < mongoTotalPages,
-            hasPrevPage: page > 1
-          }
-        }
-      };
+      return rows[0];
     } catch (error) {
-      throw new Error(`Failed to search history: ${error.message}`);
+      throw new Error(`Failed to retrieve calculation: ${error.message}`);
     }
   }
 
-  async getHistoryById(historyId, userId = null) {
+  async getHistoryById(historyId) {
     try {
-      const where = { id: historyId };
-      
-      // If userId is provided, ensure user can only access their own history
-      if (userId) {
-        where.userId = userId;
-      }
-
-      const history = await History.findOne({
-        where,
+      const history = await History.findByPk(historyId, {
         include: [
           {
             model: User,
@@ -651,111 +598,61 @@ class HistoryService {
           }
         ]
       });
-
-      if (!history) {
-        throw new Error('History record not found or access denied');
-      }
-
       return history;
     } catch (error) {
-      throw new Error(`Failed to get history record: ${error.message}`);
+      throw new Error(`Failed to retrieve history by ID: ${error.message}`);
     }
   }
 
-  async bulkDeleteHistory(historyIds, userId) {
+  async getHistoryStats(userId) {
+    const query = `
+      SELECT 
+        calculation_type,
+        COUNT(*) as count,
+        DATE(created_at) as date
+      FROM calculation_history
+      WHERE user_id = $1
+      GROUP BY calculation_type, DATE(created_at)
+      ORDER BY date DESC
+      LIMIT 30
+    `;
+
     try {
-      const deleted = await History.destroy({
-        where: {
-          id: { [Op.in]: historyIds },
-          userId
-        }
-      });
-
-      return {
-        success: true,
-        deletedCount: deleted,
-        message: `${deleted} history records deleted successfully`
-      };
+      const { rows } = await pool.query(query, [userId]);
+      return rows;
     } catch (error) {
-      throw new Error(`Failed to bulk delete history records: ${error.message}`);
-    }
-  }
-
-  async getHistoryStats(userId, options = {}) {
-    try {
-      const { startDate, endDate } = options;
-      const where = { userId };
-
-      if (startDate || endDate) {
-        where.timestamp = {};
-        if (startDate) where.timestamp[Op.gte] = new Date(startDate);
-        if (endDate) where.timestamp[Op.lte] = new Date(endDate);
-      }
-
-      const stats = await History.findAll({
-        where,
-        attributes: [
-          'type',
-          [History.sequelize.fn('COUNT', History.sequelize.col('id')), 'count'],
-          [History.sequelize.fn('MAX', History.sequelize.col('timestamp')), 'lastActivity']
-        ],
-        group: ['type'],
-        raw: true
-      });
-
-      const totalCount = await History.count({ where });
-
-      return {
-        totalRecords: totalCount,
-        byType: stats,
-        period: { startDate, endDate }
-      };
-    } catch (error) {
-      throw new Error(`Failed to get history statistics: ${error.message}`);
-    }
-  }
-
-  async getMemorySlots(userId) {
-    try {
-      const memorySlots = await Memory.findAll({
-        where: { userId },
-        order: [['slotNumber', 'ASC']],
-        attributes: ['id', 'slotNumber', 'title', 'content', 'metadata', 'createdAt', 'updatedAt']
-      });
-
-      const slots = Array.from({ length: 10 }, (_, index) => {
-        const slotNumber = index + 1;
-        const existingSlot = memorySlots.find(slot => slot.slotNumber === slotNumber);
-        
-        return existingSlot || {
-          slotNumber,
-          title: null,
-          content: null,
-          metadata: {},
-          isEmpty: true
-        };
-      });
-
-      return slots;
-    } catch (error) {
-      throw new Error(`Failed to get memory slots: ${error.message}`);
+      throw new Error(`Failed to retrieve history statistics: ${error.message}`);
     }
   }
 }
 
+const historyService = new HistoryService();
+
 module.exports = {
-  HistoryService,
+  // File-based functions
   addToHistory,
   deleteHistoryItem,
   clearHistory,
   loadHistory,
   saveHistory,
+  
+  // MongoDB functions
   createHistoryEntry,
-  getUserHistory: async (userId, options = {}) => {
-    const service = new HistoryService();
-    return service.getUserHistory(userId, options);
-  },
   deleteHistoryEntry,
-  searchHistory: searchHistoryByQuery,
-  getHistoryByDateRange
+  getHistoryByDateRange,
+  searchHistoryByQuery,
+  
+  // Service class methods
+  saveCalculation: (userId, calculation) => historyService.saveCalculation(userId, calculation),
+  getUserHistory: (userId, options) => historyService.getUserHistory(userId, options),
+  deleteCalculation: (userId, calculationId) => historyService.deleteCalculation(userId, calculationId),
+  clearUserHistory: (userId, calculationType) => historyService.clearUserHistory(userId, calculationType),
+  getCalculationById: (userId, calculationId) => historyService.getCalculationById(userId, calculationId),
+  getHistoryStats: (userId) => historyService.getHistoryStats(userId),
+  createHistory: (userId, data) => historyService.createHistory(userId, data),
+  saveToHistory: (userId, data) => historyService.saveToHistory(userId, data),
+  getHistoryById: (historyId) => historyService.getHistoryById(historyId),
+  
+  // Export the service class itself
+  HistoryService
 };

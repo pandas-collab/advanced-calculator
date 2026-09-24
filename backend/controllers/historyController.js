@@ -1,3 +1,4 @@
+const historyService = require('../services/historyService');
 const { validationResult } = require('express-validator');
 const History = require("../models/History");
 const Calculation = require("../models/Calculation");
@@ -10,15 +11,24 @@ let historyIdCounter = 1;
 
 const getHistory = async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
+
     const { page = 1, limit = 20, userId, sortBy, sortOrder, category, dateFrom, dateTo } = req.query;
     const offset = (page - 1) * limit;
+    const finalUserId = req.user?.id || userId;
 
-    if (!userId) {
+    if (!finalUserId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
     let whereClause = {
-      userId: userId
+      userId: finalUserId
     };
 
     // Apply category filter if provided
@@ -64,15 +74,14 @@ const getHistory = async (req, res) => {
 
     res.json({
       success: true,
-      data: {
-        history,
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages,
-          totalItems: total,
-          hasNextPage: page < totalPages,
-          hasPrevPage: page > 1
-        }
+      data: history,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages,
+        totalItems: total,
+        itemsPerPage: parseInt(limit),
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
       }
     });
   } catch (error) {
@@ -80,7 +89,7 @@ const getHistory = async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Error retrieving history',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -98,8 +107,9 @@ const searchHistory = async (req, res) => {
 
     const { q: query, userId, page = 1, limit = 20, category } = req.query;
     const offset = (page - 1) * limit;
+    const finalUserId = req.user?.id || userId;
 
-    if (!userId) {
+    if (!finalUserId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
@@ -111,7 +121,7 @@ const searchHistory = async (req, res) => {
     }
 
     let whereClause = {
-      userId: userId,
+      userId: finalUserId,
       OR: [
         {
           title: {
@@ -181,7 +191,61 @@ const searchHistory = async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Error searching history',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const saveCalculation = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
+
+    const userId = req.user?.id || req.body.userId;
+    const { expression, result, calculationType, metadata } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
+
+    if (!expression || result === undefined || result === null) {
+      return res.status(400).json({
+        success: false,
+        message: 'Expression and result are required'
+      });
+    }
+
+    const calculationData = {
+      userId,
+      expression,
+      result,
+      calculationType: calculationType || 'basic',
+      metadata: metadata || {},
+      timestamp: new Date(),
+      createdAt: new Date()
+    };
+
+    const savedCalculation = await historyService.saveCalculation(calculationData);
+
+    res.status(201).json({
+      success: true,
+      message: 'Calculation saved successfully',
+      data: savedCalculation
+    });
+  } catch (error) {
+    console.error('Error saving calculation:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to save calculation',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -191,8 +255,9 @@ const deleteHistory = async (req, res) => {
     const { historyId, id } = req.params;
     const { userId } = req.body;
     const targetId = historyId || id;
+    const finalUserId = req.user?.id || userId;
 
-    if (!userId) {
+    if (!finalUserId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
@@ -206,7 +271,7 @@ const deleteHistory = async (req, res) => {
     const history = await prisma.chatHistory.findFirst({
       where: {
         id: targetId,
-        userId: userId
+        userId: finalUserId
       }
     });
 
@@ -214,6 +279,13 @@ const deleteHistory = async (req, res) => {
       return res.status(404).json({ 
         success: false,
         message: 'History item not found'
+      });
+    }
+
+    if (history.userId !== finalUserId && !req.user?.isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized to delete this history item'
       });
     }
 
@@ -241,16 +313,84 @@ const deleteHistory = async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Error deleting history item',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const deleteHistoryItem = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
+
+    const { id } = req.params;
+    const userId = req.user?.id || req.body.userId || req.query.userId;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'History item ID is required'
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
+
+    const item = await historyService.getHistoryItemById(id);
+    
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'History item not found'
+      });
+    }
+
+    if (item.userId !== userId && !req.user?.isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized to delete this history item'
+      });
+    }
+
+    await historyService.deleteHistoryItem(id);
+
+    res.status(200).json({
+      success: true,
+      message: 'History item deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting history item:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete history item',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
 
 const clearHistory = async (req, res) => {
   try {
-    const { userId, category, dateFrom, dateTo, confirmClear } = req.body;
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
 
-    if (!userId) {
+    const { userId, category, dateFrom, dateTo, confirmClear, beforeDate, calculationType } = req.body;
+    const finalUserId = req.user?.id || userId || req.query.userId;
+
+    if (!finalUserId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
@@ -261,7 +401,7 @@ const clearHistory = async (req, res) => {
       });
     }
 
-    let whereClause = { userId: userId };
+    let whereClause = { userId: finalUserId };
 
     // Apply selective clearing based on filters
     if (category) {
@@ -271,10 +411,11 @@ const clearHistory = async (req, res) => {
       };
     }
 
-    if (dateFrom || dateTo) {
+    if (dateFrom || dateTo || beforeDate) {
       whereClause.createdAt = {};
       if (dateFrom) whereClause.createdAt.gte = new Date(dateFrom);
       if (dateTo) whereClause.createdAt.lte = new Date(dateTo);
+      if (beforeDate) whereClause.createdAt.lte = new Date(beforeDate);
     }
 
     const beforeCount = await prisma.chatHistory.count({
@@ -302,8 +443,20 @@ const clearHistory = async (req, res) => {
       where: whereClause
     });
 
+    // Also use historyService for additional cleanup
+    try {
+      const clearOptions = {
+        userId: finalUserId,
+        beforeDate: beforeDate ? new Date(beforeDate) : null,
+        calculationType: calculationType || null
+      };
+      await historyService.clearUserHistory(clearOptions);
+    } catch (serviceError) {
+      console.warn('Service clear error (non-fatal):', serviceError);
+    }
+
     const afterCount = await prisma.chatHistory.count({
-      where: { userId: userId }
+      where: { userId: finalUserId }
     });
 
     const clearedCount = beforeCount;
@@ -311,6 +464,7 @@ const clearHistory = async (req, res) => {
     res.json({ 
       success: true,
       message: `Successfully cleared ${clearedCount} history items`,
+      deletedCount: clearedCount,
       data: {
         clearedCount,
         remainingCount: afterCount
@@ -321,7 +475,7 @@ const clearHistory = async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Error clearing history',
-      error: error.message
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -329,13 +483,14 @@ const clearHistory = async (req, res) => {
 const getHistoryStats = async (req, res) => {
   try {
     const { userId } = req.query;
+    const finalUserId = req.user?.id || userId;
 
-    if (!userId) {
+    if (!finalUserId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
     const totalItems = await prisma.chatHistory.count({
-      where: { userId: userId }
+      where: { userId: finalUserId }
     });
     
     if (totalItems === 0) {
@@ -356,7 +511,7 @@ const getHistoryStats = async (req, res) => {
     const categoryBreakdown = {};
     const categories = await prisma.chatHistory.groupBy({
       by: ['category'],
-      where: { userId: userId },
+      where: { userId: finalUserId },
       _count: { category: true }
     });
     
@@ -371,7 +526,7 @@ const getHistoryStats = async (req, res) => {
     
     const recentActivity = await prisma.chatHistory.findMany({
       where: {
-        userId: userId,
+        userId: finalUserId,
         createdAt: {
           gte: sevenDaysAgo
         }
@@ -384,7 +539,7 @@ const getHistoryStats = async (req, res) => {
 
     // Date range
     const dateStats = await prisma.chatHistory.aggregate({
-      where: { userId: userId },
+      where: { userId: finalUserId },
       _min: { createdAt: true },
       _max: { createdAt: true }
     });
@@ -403,7 +558,7 @@ const getHistoryStats = async (req, res) => {
 
     const dailyActivity = await prisma.chatHistory.findMany({
       where: {
-        userId: userId,
+        userId: finalUserId,
         createdAt: {
           gte: thirtyDaysAgo
         }
@@ -435,103 +590,21 @@ const getHistoryStats = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({
+    console.error('Error fetching history stats:', error);
+    res.status(500).json({ 
       success: false,
-      message: 'Error retrieving history statistics',
-      error: error.message
+      message: 'Error fetching history stats',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
-  }
-};
-
-const getMemory = async (req, res) => {
-  try {
-    const { userId } = req.query;
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    const memory = await prisma.userMemory.findUnique({
-      where: {
-        userId: userId
-      }
-    });
-
-    if (!memory) {
-      return res.json({ memory: null });
-    }
-
-    res.json({ memory: memory.content });
-  } catch (error) {
-    console.error('Error fetching memory:', error);
-    res.status(500).json({ error: 'Failed to fetch memory' });
-  }
-};
-
-const saveMemory = async (req, res) => {
-  try {
-    const { userId, memory } = req.body;
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    if (!memory) {
-      return res.status(400).json({ error: 'Memory content is required' });
-    }
-
-    const savedMemory = await prisma.userMemory.upsert({
-      where: {
-        userId: userId
-      },
-      update: {
-        content: memory,
-        updatedAt: new Date()
-      },
-      create: {
-        userId: userId,
-        content: memory
-      }
-    });
-
-    res.json({ 
-      message: 'Memory saved successfully',
-      memory: savedMemory.content
-    });
-  } catch (error) {
-    console.error('Error saving memory:', error);
-    res.status(500).json({ error: 'Failed to save memory' });
-  }
-};
-
-const clearMemory = async (req, res) => {
-  try {
-    const { userId } = req.body;
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    await prisma.userMemory.deleteMany({
-      where: {
-        userId: userId
-      }
-    });
-
-    res.json({ message: 'Memory cleared successfully' });
-  } catch (error) {
-    console.error('Error clearing memory:', error);
-    res.status(500).json({ error: 'Failed to clear memory' });
   }
 };
 
 module.exports = {
   getHistory,
   searchHistory,
+  saveCalculation,
   deleteHistory,
+  deleteHistoryItem,
   clearHistory,
-  getHistoryStats,
-  getMemory,
-  saveMemory,
-  clearMemory
+  getHistoryStats
 };
