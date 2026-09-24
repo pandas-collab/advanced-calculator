@@ -1,331 +1,247 @@
-const { evaluate, parse, format, typeOf, complex, re, im } = require('mathjs');
+const math = require('mathjs');
 
-// Sanitize mathematical input to prevent injection attacks
-function sanitizeInput(input) {
-  if (typeof input !== 'string') {
-    throw new Error('Input must be a string');
-  }
-  
-  // Remove potentially dangerous characters and patterns
-  const sanitized = input
-    .replace(/[^\w\s+\-*/().^,=<>!|&\[\]{}]/g, '')
-    .trim();
-  
-  // Check for suspicious patterns
-  const suspiciousPatterns = [
-    /import\s*\(/,
-    /require\s*\(/,
-    /eval\s*\(/,
-    /function\s*\(/,
-    /=>\s*{/,
-    /process\./,
-    /global\./,
-    /window\./,
-    /__proto__/,
-    /constructor/
-  ];
-  
-  for (const pattern of suspiciousPatterns) {
-    if (pattern.test(sanitized)) {
-      throw new Error('Invalid characters or patterns detected');
-    }
-  }
-  
-  return sanitized;
-}
-
-// Validate if a string is a valid mathematical expression
-function isValidMathExpression(expression) {
+/**
+ * Evaluates a mathematical expression safely
+ * @param {string} expression - The mathematical expression to evaluate
+ * @returns {Object} - Result object with value and error status
+ */
+function evaluateExpression(expression) {
   try {
-    const sanitized = sanitizeInput(expression);
-    parse(sanitized);
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
+    if (!expression || typeof expression !== 'string') {
+      throw new Error('Invalid expression format');
+    }
 
-// Validate and parse mathematical expressions
-function validateExpression(expression) {
-  try {
-    const sanitized = sanitizeInput(expression);
+    // Sanitize expression - remove potential harmful functions
+    const sanitizedExpression = sanitizeExpression(expression);
     
-    if (!sanitized || sanitized.length === 0) {
-      throw new Error('Expression cannot be empty');
-    }
+    // Create a limited math context for security
+    const limitedMath = math.create({
+      matrix: 'Array',
+      number: 'number'
+    });
     
-    if (sanitized.length > 1000) {
-      throw new Error('Expression too long');
-    }
-    
-    // Parse the expression to check syntax
-    const parsed = parse(sanitized);
-    
-    // Check for allowed functions and operations
-    const allowedTypes = [
-      'OperatorNode',
-      'FunctionNode',
-      'ConstantNode',
-      'SymbolNode',
-      'ParenthesesNode',
-      'ArrayNode',
-      'ObjectNode'
-    ];
-    
-    function validateNode(node) {
-      if (!allowedTypes.includes(node.type)) {
-        throw new Error(`Unsupported node type: ${node.type}`);
-      }
-      
-      if (node.type === 'FunctionNode') {
-        const allowedFunctions = [
-          'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2',
-          'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh',
-          'log', 'log10', 'log2', 'ln', 'exp', 'sqrt', 'cbrt',
-          'abs', 'sign', 'ceil', 'floor', 'round', 'fix',
-          'min', 'max', 'mean', 'median', 'mode', 'std', 'var',
-          'sum', 'prod', 'gcd', 'lcm', 'factorial',
-          'pow', 'mod', 'random', 'complex', 're', 'im', 'arg', 'conj'
-        ];
-        
-        if (!allowedFunctions.includes(node.fn.name)) {
-          throw new Error(`Function not allowed: ${node.fn.name}`);
-        }
-      }
-      
-      if (node.args) {
-        node.args.forEach(validateNode);
-      }
-      if (node.content) {
-        validateNode(node.content);
-      }
-      if (node.items) {
-        node.items.forEach(validateNode);
-      }
-    }
-    
-    validateNode(parsed);
+    // Remove potentially dangerous functions
+    limitedMath.import({
+      import: () => { throw new Error('Function disabled') },
+      createUnit: () => { throw new Error('Function disabled') },
+      evaluate: () => { throw new Error('Function disabled') },
+      parse: () => { throw new Error('Function disabled') }
+    }, { override: true });
+
+    const result = limitedMath.evaluate(sanitizedExpression);
     
     return {
-      isValid: true,
-      parsed: parsed,
-      sanitized: sanitized
+      success: true,
+      value: result,
+      error: null,
+      expression: sanitizedExpression
     };
+  } catch (error) {
+    return {
+      success: false,
+      value: null,
+      error: error.message,
+      expression: expression
+    };
+  }
+}
+
+/**
+ * Validates if an expression is mathematically valid
+ * @param {string} expression - The expression to validate
+ * @returns {Object} - Validation result
+ */
+function validateExpression(expression) {
+  try {
+    if (!expression || typeof expression !== 'string') {
+      return {
+        isValid: false,
+        error: 'Expression must be a non-empty string',
+        suggestions: ['Provide a valid mathematical expression']
+      };
+    }
+
+    // Check for basic syntax issues
+    const sanitized = sanitizeExpression(expression);
+    
+    // Check for balanced parentheses
+    if (!hasBalancedParentheses(sanitized)) {
+      return {
+        isValid: false,
+        error: 'Unbalanced parentheses',
+        suggestions: ['Check opening and closing parentheses']
+      };
+    }
+
+    // Check for invalid characters
+    const invalidChars = /[^0-9+\-*/().\s\^sqrtlogsincostandgexpabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_]/;
+    if (invalidChars.test(sanitized)) {
+      return {
+        isValid: false,
+        error: 'Contains invalid characters',
+        suggestions: ['Use only numbers, operators, and mathematical functions']
+      };
+    }
+
+    // Try to parse with math.js
+    try {
+      math.parse(sanitized);
+      return {
+        isValid: true,
+        error: null,
+        suggestions: []
+      };
+    } catch (parseError) {
+      return {
+        isValid: false,
+        error: parseError.message,
+        suggestions: ['Check expression syntax']
+      };
+    }
   } catch (error) {
     return {
       isValid: false,
-      error: error.message,
-      sanitized: null
+      error: 'Validation failed: ' + error.message,
+      suggestions: ['Provide a valid mathematical expression']
     };
   }
 }
 
-// Format mathematical results for display
+/**
+ * Formats a numerical result for display
+ * @param {number|string} result - The result to format
+ * @param {Object} options - Formatting options
+ * @returns {string} - Formatted result
+ */
 function formatResult(result, options = {}) {
-  const {
-    precision = 10,
-    notation = 'auto',
-    lowerExp = -3,
-    upperExp = 5
-  } = options;
-  
   try {
+    const {
+      precision = 10,
+      notation = 'auto',
+      removeTrailingZeros = true,
+      thousandsSeparator = false
+    } = options;
+
     if (result === null || result === undefined) {
-      return 'undefined';
+      return 'No result';
     }
-    
-    if (typeof result === 'boolean') {
-      return result.toString();
-    }
-    
+
     if (typeof result === 'string') {
       return result;
     }
-    
-    // Handle complex numbers
-    if (typeOf(result) === 'Complex') {
-      const realPart = re(result);
-      const imagPart = im(result);
-      
-      if (Math.abs(imagPart) < 1e-10) {
-        return format(realPart, { precision, notation, lowerExp, upperExp });
-      }
-      
-      const formattedReal = format(realPart, { precision, notation, lowerExp, upperExp });
-      const formattedImag = format(Math.abs(imagPart), { precision, notation, lowerExp, upperExp });
-      const sign = imagPart >= 0 ? '+' : '-';
-      
-      if (Math.abs(realPart) < 1e-10) {
-        return `${imagPart < 0 ? '-' : ''}${formattedImag}i`;
-      }
-      
-      return `${formattedReal} ${sign} ${formattedImag}i`;
-    }
-    
-    // Handle arrays and matrices
-    if (Array.isArray(result)) {
-      return format(result, { precision, notation, lowerExp, upperExp });
-    }
-    
-    // Handle numbers
-    if (typeof result === 'number') {
-      if (!isFinite(result)) {
-        return result.toString();
-      }
-      
-      return format(result, { precision, notation, lowerExp, upperExp });
-    }
-    
-    // Use mathjs format for other types
-    return format(result, { precision, notation, lowerExp, upperExp });
-  } catch (error) {
-    return result.toString();
-  }
-}
 
-// Handle mathematical errors gracefully
-function handleMathError(error) {
-  const errorTypes = {
-    'SyntaxError': 'Invalid mathematical syntax',
-    'TypeError': 'Type error in mathematical operation',
-    'RangeError': 'Value out of valid range',
-    'EvalError': 'Evaluation error',
-    'ReferenceError': 'Undefined variable or function'
-  };
-  
-  let message = error.message;
-  let type = 'MathError';
-  
-  // Classify error type
-  for (const [errorType, description] of Object.entries(errorTypes)) {
-    if (error.name === errorType || message.includes(errorType)) {
-      type = errorType;
-      message = description + ': ' + message;
-      break;
+    if (typeof result === 'boolean') {
+      return result.toString();
     }
-  }
-  
-  // Handle specific math.js errors
-  if (message.includes('Unexpected type')) {
-    type = 'TypeError';
-    message = 'Invalid data type for mathematical operation';
-  } else if (message.includes('Value out of range')) {
-    type = 'RangeError';
-    message = 'Mathematical result is out of valid range';
-  } else if (message.includes('Cannot evaluate')) {
-    type = 'EvalError';
-    message = 'Unable to evaluate mathematical expression';
-  }
-  
-  return {
-    type: type,
-    message: message,
-    originalError: error.message,
-    stack: error.stack
-  };
-}
 
-// Parse complex numbers from string representation
-function parseComplexNumber(input) {
-  try {
-    const sanitized = sanitizeInput(input);
+    if (typeof result === 'object') {
+      if (Array.isArray(result)) {
+        return '[' + result.map(item => formatResult(item, options)).join(', ') + ']';
+      }
+      return JSON.stringify(result);
+    }
+
+    const num = Number(result);
     
-    // Try to evaluate as complex number
-    const result = evaluate(sanitized);
-    
-    if (typeOf(result) === 'Complex') {
-      return {
-        isValid: true,
-        complex: result,
-        real: re(result),
-        imaginary: im(result),
-        magnitude: Math.sqrt(re(result) ** 2 + im(result) ** 2),
-        phase: Math.atan2(im(result), re(result))
-      };
-    } else if (typeof result === 'number') {
-      return {
-        isValid: true,
-        complex: complex(result, 0),
-        real: result,
-        imaginary: 0,
-        magnitude: Math.abs(result),
-        phase: result < 0 ? Math.PI : 0
-      };
+    if (isNaN(num)) {
+      return 'Invalid number';
+    }
+
+    if (!isFinite(num)) {
+      return num > 0 ? 'Infinity' : num < 0 ? '-Infinity' : 'NaN';
+    }
+
+    let formatted;
+
+    // Handle very large or very small numbers
+    if (notation === 'exponential' || 
+        (notation === 'auto' && (Math.abs(num) >= 1e10 || (Math.abs(num) < 1e-4 && num !== 0)))) {
+      formatted = num.toExponential(precision);
     } else {
-      throw new Error('Input is not a valid complex number');
+      formatted = num.toPrecision(precision);
     }
+
+    // Remove trailing zeros if requested
+    if (removeTrailingZeros && formatted.includes('.')) {
+      formatted = formatted.replace(/\.?0+$/, '');
+    }
+
+    // Add thousands separator if requested
+    if (thousandsSeparator && !formatted.includes('e')) {
+      const parts = formatted.split('.');
+      parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      formatted = parts.join('.');
+    }
+
+    return formatted;
   } catch (error) {
-    return {
-      isValid: false,
-      error: error.message,
-      complex: null,
-      real: null,
-      imaginary: null,
-      magnitude: null,
-      phase: null
-    };
+    return 'Formatting error: ' + error.message;
   }
 }
 
-// Validate mathematical domains for specific operations
-function validateDomain(operation, value) {
-  try {
-    const numValue = typeof value === 'number' ? value : evaluate(sanitizeInput(value.toString()));
-    
-    if (typeof numValue !== 'number') {
-      throw new Error('Value must be a number');
-    }
-    
-    const domainChecks = {
-      'sqrt': (x) => x >= 0 || 'Square root requires non-negative value',
-      'log': (x) => x > 0 || 'Logarithm requires positive value',
-      'log10': (x) => x > 0 || 'Base-10 logarithm requires positive value',
-      'ln': (x) => x > 0 || 'Natural logarithm requires positive value',
-      'asin': (x) => x >= -1 && x <= 1 || 'Arcsine requires value between -1 and 1',
-      'acos': (x) => x >= -1 && x <= 1 || 'Arccosine requires value between -1 and 1',
-      'atan': (x) => true, // No domain restrictions
-      'asinh': (x) => true, // No domain restrictions
-      'acosh': (x) => x >= 1 || 'Inverse hyperbolic cosine requires value >= 1',
-      'atanh': (x) => x > -1 && x < 1 || 'Inverse hyperbolic tangent requires -1 < x < 1',
-      'factorial': (x) => Number.isInteger(x) && x >= 0 || 'Factorial requires non-negative integer',
-      'divide': (x) => x !== 0 || 'Division by zero is not allowed',
-      'mod': (x) => x !== 0 || 'Modulo by zero is not allowed'
-    };
-    
-    if (!domainChecks[operation]) {
-      return {
-        isValid: true,
-        message: 'No domain restrictions for this operation'
-      };
-    }
-    
-    const result = domainChecks[operation](numValue);
-    
-    if (result === true) {
-      return {
-        isValid: true,
-        message: 'Value is within valid domain'
-      };
-    } else {
-      return {
-        isValid: false,
-        message: result
-      };
-    }
-  } catch (error) {
-    return {
-      isValid: false,
-      message: 'Error validating domain: ' + error.message
-    };
+/**
+ * Simple validation check for mathematical expressions
+ * @param {string} expression - Expression to check
+ * @returns {boolean} - True if valid
+ */
+function isValidMathExpression(expression) {
+  const validation = validateExpression(expression);
+  return validation.isValid;
+}
+
+/**
+ * Sanitizes mathematical expression by removing potentially harmful content
+ * @param {string} expression - Expression to sanitize
+ * @returns {string} - Sanitized expression
+ */
+function sanitizeExpression(expression) {
+  if (typeof expression !== 'string') {
+    throw new Error('Expression must be a string');
   }
+
+  // Remove any potential script tags or HTML
+  let sanitized = expression.replace(/<[^>]*>/g, '');
+  
+  // Remove potentially dangerous keywords
+  const dangerousKeywords = [
+    'import', 'require', 'eval', 'Function', 'constructor',
+    'prototype', 'window', 'document', 'global', 'process'
+  ];
+  
+  dangerousKeywords.forEach(keyword => {
+    const regex = new RegExp(keyword, 'gi');
+    sanitized = sanitized.replace(regex, '');
+  });
+
+  // Trim whitespace
+  sanitized = sanitized.trim();
+
+  return sanitized;
+}
+
+/**
+ * Checks if parentheses are balanced in an expression
+ * @param {string} expression - Expression to check
+ * @returns {boolean} - True if balanced
+ */
+function hasBalancedParentheses(expression) {
+  let count = 0;
+  for (let char of expression) {
+    if (char === '(') {
+      count++;
+    } else if (char === ')') {
+      count--;
+      if (count < 0) {
+        return false;
+      }
+    }
+  }
+  return count === 0;
 }
 
 module.exports = {
+  evaluateExpression,
   validateExpression,
-  sanitizeInput,
   formatResult,
-  handleMathError,
-  isValidMathExpression,
-  parseComplexNumber,
-  validateDomain
+  isValidMathExpression
 };
