@@ -1,54 +1,47 @@
-import { useState, useEffect } from 'react';
+import { login as authLogin, logout as authLogout, getProfile } from "../services/authService.js";
+import { useContext } from "react";
+import { AuthContext } from "../context/AuthContext.js";
 
-const MOCK_USER = {
-  email: 'demo@calculator.com',
-  password: 'demo123',
-  name: 'Demo User'
-};
+export const useAuth = () => {
+  const context = useContext(AuthContext);
 
-const useAuth = () => {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
 
-  useEffect(() => {
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      setUser(MOCK_USER);
-    }
-    setLoading(false);
-  }, []);
+  const { user, isAuthenticated, loading } = context;
 
-  const login = async (email, password) => {
-    if (email === MOCK_USER.email && password === MOCK_USER.password) {
-      const mockToken = 'mock_jwt_token_' + Date.now();
-      localStorage.setItem('auth_token', mockToken);
-      setUser(MOCK_USER);
-      return Promise.resolve();
-    } else {
-      return Promise.reject(new Error('Invalid credentials'));
+  const login = async (credentials) => {
+    try {
+      const response = await authLogin(credentials);
+      return response;
+    } catch (error) {
+      throw error;
     }
   };
 
-  const register = async (name, email, password) => {
-    const mockToken = 'mock_jwt_token_' + Date.now();
-    localStorage.setItem('auth_token', mockToken);
-    const newUser = { name, email };
-    setUser(newUser);
-    return Promise.resolve();
+  const logout = async () => {
+    try {
+      await authLogout();
+    } catch (error) {
+      console.error("Logout error:", error);
+    }
   };
 
-  const logout = () => {
-    localStorage.removeItem('auth_token');
-    setUser(null);
+  const getUserProfile = async () => {
+    try {
+      return await getProfile();
+    } catch (error) {
+      throw error;
+    }
   };
 
   return {
     user,
+    isAuthenticated,
     loading,
     login,
-    register,
-    logout
+    logout,
+    getUserProfile
   };
 };
-
-export default useAuth;
